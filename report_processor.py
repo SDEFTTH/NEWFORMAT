@@ -1087,7 +1087,7 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
             "TO BE COMPLETED": pending_count,
             "TO BE CANCELLED": None,  # No explicit cancellation disposition in source.
             "CIRCLE PROJECT CONX (SCHOOLS/JR.COLG)": school_count,
-            "NEW CONN BY OA TEAM": (gross-school_count-CONN_RECON),  # Source has no reliable OA-team flag.
+            "NEW CONN BY OA TEAM": (int(gross)-int(school_count)-int(CONN_RECON)),  # Source has no reliable OA-team flag.
             "LL-FTTH CONVERSION": None,  # Source has no explicit LL conversion field.
             "RECONX FROM INACTIVE (LL/FTTH)": None,  # Source does not identify prior LL/FTTH status.
             "TOTAL UC REQUIRED CONX": uc_required,
