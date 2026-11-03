@@ -110,7 +110,7 @@ def _parse_source_date(series):
 
 def _read_source(path):
     # The source export has column headings on Excel row 3 => header=2.
-    df = pd.read_excel(path, sheet_name="Sheet0", header=2, engine="calamine")
+    df = pd.read_excel(path, sheet_name="Sheet0", header=2)
     df = df.dropna(how="all").copy()
     df.columns = [str(c).strip() for c in df.columns]
     return df
@@ -163,12 +163,6 @@ def _bbc_report(df, report_date, olt_map, bbc_info, bbc_order):
         x=df[df["BBC Name"]==bbc]
         npc=int((x["Connection Type"]==CONN_NPC).sum())
         recon=int((x["Connection Type"]==CONN_RECON).sum())
-        recon_inactive_count = int(
-            pd.to_numeric(
-                bbm_df["RECON"],
-                errors="coerce"
-            ).eq(1).sum()
-        )
         clsvo=int((x["Connection Type"]==CONN_CLSVO).sum())
         clsnp=int((x["Connection Type"]==CONN_CLSNP).sum())
         today=int(((x["Connection Type"].isin([CONN_NPC,CONN_RECON])) & (x["DATE"]==report_date)).sum())
@@ -574,8 +568,8 @@ def run_report(input_file, output_xlsx, output_html):
     # Keep the existing Python columns, including NPC and RECONNECTIONS.
     # The HTML table is generated from the dataframe so no report data is lost.
     html_columns = [
-        "S.No", "AGM/ Manager(MT)", "BBM NAME", "AREA",
-        "OLTEs Mapped", "Monthly Target",
+        "S.No", "DE / AGM ", "BBM NAME", "AREA",
+        "No. Of OLTEs Mapped", "Monthly Target",
         f"Daily Provision{report_date:%d-%m-%Y}",
         "Cumulative Achievement", "% of Achievement",
         "NPC", "RECONNECTIONS", "CLSVO", "CLSNP",
@@ -1041,7 +1035,7 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
     for col in ("Customer Name", "plan name", "User Type"):
         if col in month_rows.columns:
             school_mask |= _clean_text(month_rows[col]).str.upper().str.contains(
-                r"SCHOOL|JR\\.?\\s*COLL|JUNIOR COLLEGE", regex=True, na=False
+                r"SCHOOL|JR\.?\s*COLL|JUNIOR COLLEGE", regex=True, na=False
             )
     new_month = month_rows[month_rows["Connection Type"].isin([CONN_NPC, CONN_RECON])]
 
@@ -1093,11 +1087,7 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
             "TO BE COMPLETED": pending_count,
             "TO BE CANCELLED": None,  # No explicit cancellation disposition in source.
             "CIRCLE PROJECT CONX (SCHOOLS/JR.COLG)": school_count,
-            "NEW CONN BY OA TEAM": (
-                int(gross)
-                - int(school_count)
-                - int(recon_inactive_count)
-            ),  # Source has no reliable OA-team flag.
+            "NEW CONN BY OA TEAM": None,  # Source has no reliable OA-team flag.
             "LL-FTTH CONVERSION": None,  # Source has no explicit LL conversion field.
             "RECONX FROM INACTIVE (LL/FTTH)": None,  # Source does not identify prior LL/FTTH status.
             "TOTAL UC REQUIRED CONX": uc_required,
