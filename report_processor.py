@@ -961,7 +961,7 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
 
     provision = _read_uploaded_excel(
         provisioning_file,
-        ["OLT IP", "Order Id", "CLSR", "Completion_Date", "Maintenance Franchisee", "BBC Name"],
+        ["OLT IP", "Order Id", "CLSR", "Completion_Date", "Maintenance Franchisee", "BBC Name", "Ont Acquisition Type"],
     )
     uc = _read_uploaded_excel(
         uc_file,
@@ -1000,9 +1000,7 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
     uc = uc.copy()
     uc["BBM_KEY"] = uc_bbm
     uc["UC_APPROVED_FLAG"] = _clean_text(uc["BBC approved"]).str.upper().eq("C")
-    uc["UC_REJECTED_FLAG"] = _clean_text(uc["Comments"]).str.upper().str.contains(
-        "BBC NOT APPROVED", na=False
-    )
+    uc["UC_REJECTED_FLAG"] = _clean_text(uc["BBC approved"]).str.upper().eq("P")
 
     # Pending OBS has no OLT IP in the supplied export. Map through its
     # Maintenance franchise Code, using the provisioning export as crosswalk.
@@ -1028,15 +1026,21 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
 
     pending_group = pending.groupby("BBM_KEY", dropna=False).size().to_dict()
 
-    # New-project connections can only be identified where the source explicitly
-    # identifies a school / junior-college customer or plan. Other categories
-    # are not present as explicit fields in this export and are left blank.
-    school_mask = pd.Series(False, index=month_rows.index)
-    for col in ("Customer Name", "plan name", "User Type"):
-        if col in month_rows.columns:
-            school_mask |= _clean_text(month_rows[col]).str.upper().str.contains(
-                r"SCHOOL|JR\.?\s*COLL|JUNIOR COLLEGE", regex=True, na=False
-            )
+    # Classify special connection categories using the exact source fields
+    # specified for the BBM-wise report.
+    plan_col = next((c for c in month_rows.columns if c.strip().casefold() == "plan name"), None)
+    acquisition_col = next((c for c in month_rows.columns if c.strip().casefold() == "ont acquisition type"), None)
+    school_mask = (
+        _clean_text(month_rows[plan_col]).str.strip().str.upper()
+        .eq("FIBRE BASIC PLUS - TS GOVT SCHOOL -Q-COMBO-FBB")
+        if plan_col else pd.Series(False, index=month_rows.index)
+    )
+    recon_inactive_mask = pd.to_numeric(month_rows.get("RECON", 0), errors="coerce").fillna(0).eq(1)
+    uc_required_mask = (
+        _clean_text(month_rows[acquisition_col]).str.strip().str.casefold()
+        .eq("bundledwifiontbyfranchisee".casefold())
+        if acquisition_col else pd.Series(False, index=month_rows.index)
+    )
     new_month = month_rows[month_rows["Connection Type"].isin([CONN_NPC, CONN_RECON])]
 
     rows = []
@@ -1056,15 +1060,19 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
         day_2 = int((provision_bbm["DATE"] == report_date).sum())
 
         u = uc_group.loc[bbc] if len(uc_group) and bbc in uc_group.index else None
-        uc_required = int(u["UC_REQUIRED"]) if u is not None else 0
+        uc_required = int(((month_rows["BBC Name"] == bbc) & uc_required_mask).sum())
         uc_approved = int(u["UC_APPROVED"]) if u is not None else 0
         uc_rejected = int(u["UC_REJECTED"]) if u is not None else 0
-        uc_pending = max(0, uc_required - uc_approved - uc_rejected)
+        uc_pending = uc_required - uc_approved - uc_rejected
 
         pending_count = int(pending_group.get(bbc, 0))
         school_count = int(
             ((new_month["BBC Name"] == bbc) & school_mask.loc[new_month.index]).sum()
         )
+        recon_inactive_count = int(
+            ((month_rows["BBC Name"] == bbc) & recon_inactive_mask).sum()
+        )
+        new_conn_oa_team = gross - school_count - recon_inactive_count
 
         rows.append({
             "S.No": index,
@@ -1087,9 +1095,9 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
             "TO BE COMPLETED": pending_count,
             "TO BE CANCELLED": None,  # No explicit cancellation disposition in source.
             "CIRCLE PROJECT CONX (SCHOOLS/JR.COLG)": school_count,
-            "NEW CONN BY OA TEAM": None,  # Source has no reliable OA-team flag.
-            "LL-FTTH CONVERSION": None,  # Source has no explicit LL conversion field.
-            "RECONX FROM INACTIVE (LL/FTTH)": None,  # Source does not identify prior LL/FTTH status.
+            "NEW CONN BY OA TEAM": new_conn_oa_team,
+            "LL-FTTH CONVERSION": None,  # No separate LL-FTTH conversion rule was specified.
+            "RECONX FROM INACTIVE (LL/FTTH)": recon_inactive_count,
             "TOTAL UC REQUIRED CONX": uc_required,
             "UC APPROVED BY BBM": uc_approved,
             "UC REJECTD BY BBM": uc_rejected,
@@ -1313,8 +1321,9 @@ def run_daily_report(provisioning_file, uc_file, pending_file,
         ["Unmapped UC OLT IPs", ", ".join(context["unmapped_uc"]) or "None"],
         ["Unmapped Pending franchise codes", ", ".join(context["unmapped_pending"]) or "None"],
         ["Important note", "COMPLETED and TO BE CANCELLED are blank because the Pending OBS export contains only current pending records and no completion/cancellation history."],
-        ["Important note", "NEW CONN BY OA TEAM, LL-FTTH CONVERSION and RECONX FROM INACTIVE are blank because the uploaded provisioning export does not contain explicit reliable category fields."],
-        ["UC interpretation", "BBC approved = C counted as approved; Comments containing BBC NOT APPROVED counted as rejected; balance counted as pending."],
+        ["Category logic", "Circle Project = exact Plan Name 'FIBRE BASIC PLUS - TS GOVT SCHOOL -Q-COMBO-FBB'; RECONX FROM INACTIVE = RECON flag 1; TOTAL UC REQUIRED = Ont Acquisition Type 'BundledWIFIONTByFranchisee'."],
+        ["UC interpretation", "BBC approved = C counted as approved; BBC approved = P counted as rejected; UC Pending = Total UC Required - Approved - Rejected."],
+        ["OA team calculation", "NEW CONN BY OA TEAM = GROSS PROVISION - CIRCLE PROJECT CONX - RECONX FROM INACTIVE (LL/FTTH)."],
     ]
     export_dates = [context["provision_export_time"], context["uc_export_time"], context["pending_export_time"]]
     valid_export_dates = [pd.Timestamp(x).normalize() for x in export_dates if x is not None]
