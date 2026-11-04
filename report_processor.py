@@ -1119,173 +1119,526 @@ def _daily_report_frame(provisioning_file, uc_file, pending_file, report_date=No
     }
 
 
+# ---------------------------------------------------------------------------
+# DAILY REPORT sheet styling.
+# Every colour, font size, rotation, merge, column width and number format
+# below is taken from the reference workbook DAILY_PROVISIONS_REPORT.xlsx
+# (Google-Sheets-style pastel palette, Calibri, thin black borders).
+# ---------------------------------------------------------------------------
+_DR_COLORS = {
+    "title":     "#FFFF00",   # yellow title bar
+    "blue":      "#CFE2F3",   # S.No / Manager / BBM / OLT count / UC headers
+    "teal":      "#B7E1CD",   # AREA / Exclusive headers
+    "gold":      "#FFD966",   # TARGET / UC PENDING
+    "grey":      "#C9C9C9",   # provisioning + disconnection headers
+    "purple":    "#5F497A",   # NET header (theme Accent 4, darker 25%)
+    "pink":      "#EAD1DC",   # PENDING OBS headers
+    "green":     "#B6D7A8",   # GROSS PROVISION data / NEW CONN / UC APPROVED
+    "white":     "#FFFFFF",
+    "stripe":    "#F7F9FC",   # alternate-row shade on CLSVO / CLSNP
+    "text":      "#222222",
+    "tot_grey":  "#B7B7B7",
+    "tot_green": "#93C47D",
+    "tot_pink":  "#F4CCCC",
+    "tot_lgrey": "#CCCCCC",
+    "scale_min": "#F4CCCC",   # NET colour scale: negative -> red-ish
+    "scale_mid": "#FFFFFF",
+    "scale_max": "#70AD47",   # NET colour scale: positive -> green
+}
+
+# NET column number format used in the reference: green ▲ for >= 0, red ▼ for < 0.
+_DR_NET_FORMAT = "[Color10]0\\▲;[Red]\\-0\\▼"
+
+# Column widths copied from the reference (A..AA).
+_DR_REF_WIDTHS = [6.57, 13.5, 38.29, 13.0, 4.14, 10.43, 9.43, 5.71, 6.14,
+                  11.29, 9.14, 3.29, 4.43, 11.29, 8.43, 3.29, 3.29, 3.29,
+                  3.29, 5.14, 4.86, 5.71, 5.29, 4.71, 3.29, 4.14, 9.71]
+
+
+def _dr_value(v):
+    """NaN/None -> None; numpy scalars -> plain Python numbers."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(v, "item"):
+        v = v.item()
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+
+def _dr_num(v):
+    v = _dr_value(v)
+    return v if isinstance(v, (int, float)) else 0
+
+
 def _write_daily_template_report(report, output_xlsx, report_date, raw_sheets=None):
-    """Write the reference 27-column layout with grouped/merged headings."""
-    import xlsxwriter
+    """Write the 27-column DAILY REPORT in the reference workbook's style.
+
+    Layout (identical to the reference): yellow title bar in row 1, two-row
+    grouped headers in rows 2-3, one row per BBM, then a coloured TOTAL row.
+    Calculated columns are live Excel formulas (with cached values), exactly
+    as in the reference:
+        % ACH                 = GROSS PROVISION / TARGET
+        TOTAL DISCONNECTIONS  = CLSVO + CLSNP
+        NET                   = GROSS PROVISION - TOTAL DISCONNECTIONS
+        NEW CONN BY OA TEAM   = GROSS PROVISION - CIRCLE PROJECT - RECONX FROM INACTIVE
+        UC PENDING            = TOTAL UC REQUIRED - UC APPROVED - UC REJECTED
+        TOTAL row             = SUM of each column
+    """
+    from xlsxwriter.utility import xl_col_to_name
 
     output_xlsx = Path(output_xlsx)
     output_xlsx.parent.mkdir(parents=True, exist_ok=True)
     cols = list(report.columns)
+    if len(cols) != 27:
+        raise ValueError(f"Daily report expects 27 columns, got {len(cols)}.")
+    n = len(report)
+    C = _DR_COLORS
+    black = "#000000"
 
     with pd.ExcelWriter(output_xlsx, engine="xlsxwriter") as writer:
         wb = writer.book
         ws = wb.add_worksheet("DAILY REPORT")
         writer.sheets["DAILY REPORT"] = ws
-        ws.hide_gridlines(2)
-        ws.freeze_panes(3, 5)
         ws.set_landscape()
+        ws.set_paper(9)
         ws.fit_to_pages(1, 0)
         ws.repeat_rows(0, 2)
+        ws.center_horizontally()
+        ws.freeze_panes(3, 5)
 
-        navy = "#1F4E78"
-        blue = "#D9EAF7"
-        pale = "#EAF2F8"
-        white = "#FFFFFF"
-        border = "#7F8C8D"
-        green = "#E2F0D9"
-        red = "#FCE4D6"
+        # ---- format factory (cached) -------------------------------------
+        cache = {}
 
-        title_fmt = wb.add_format({
-            "bold": True, "font_size": 16, "font_color": white,
-            "bg_color": navy, "align": "center", "valign": "vcenter"
-        })
-        group_fmt = wb.add_format({
-            "bold": True, "font_color": white, "bg_color": navy,
-            "border": 1, "border_color": border, "align": "center",
-            "valign": "vcenter", "text_wrap": True
-        })
-        sub_fmt = wb.add_format({
-            "bold": True, "font_color": "#000000", "bg_color": blue,
-            "border": 1, "border_color": border, "align": "center",
-            "valign": "vcenter", "text_wrap": True
-        })
-        cell_fmt = wb.add_format({
-            "border": 1, "border_color": border, "align": "center",
-            "valign": "vcenter"
-        })
-        alt_fmt = wb.add_format({
-            "border": 1, "border_color": border, "align": "center",
-            "valign": "vcenter", "bg_color": "#F7FBFD"
-        })
-        total_fmt = wb.add_format({
-            "bold": True, "font_color": white, "bg_color": navy,
-            "border": 1, "border_color": border, "align": "center",
-            "valign": "vcenter"
-        })
-        pct_fmt = wb.add_format({
-            "num_format": "0.0%", "border": 1, "border_color": border,
-            "align": "center"
-        })
-        total_pct_fmt = wb.add_format({
-            "bold": True, "font_color": white, "bg_color": navy,
-            "num_format": "0.0%", "border": 1, "border_color": border,
-            "align": "center"
-        })
-        neg_fmt = wb.add_format({
-            "bold": True, "font_color": "#C00000", "bg_color": red,
-            "border": 1, "border_color": border, "align": "center"
-        })
-        pos_fmt = wb.add_format({
-            "bold": True, "font_color": "#006100", "bg_color": green,
-            "border": 1, "border_color": border, "align": "center"
-        })
+        def fmt(**kw):
+            props = {"font_name": "Calibri", "font_size": 10, "border": 1,
+                     "border_color": black, "align": "center", "valign": "vcenter"}
+            props.update(kw)
+            key = tuple(sorted(props.items()))
+            if key not in cache:
+                cache[key] = wb.add_format(props)
+            return cache[key]
 
-        last_col = len(cols) - 1
-        ws.merge_range(0, 0, 0, last_col,
-                       f"BBM WISE DAILY PROVISIONING REPORT OF WARANGAL OA AS ON {report_date:%d.%m.%Y}",
-                       title_fmt)
-        ws.set_row(0, 30)
+        # ---- row 1: title -------------------------------------------------
+        ws.merge_range(
+            0, 0, 0, 26,
+            f"BBM WISE DAILY PROVISIONING REPORT OF WARANGAL OA AS ON {report_date:%d.%m.%Y}",
+            fmt(bold=True, font_size=12, bg_color=C["title"], border=0))
+        ws.set_row(0, 25.5)
 
-        # Row 2: grouped headings, matching the supplied reference workbook.
-        fixed_merges = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4),
-                        (5, 5), (6, 6), (9, 9), (10, 10), (11, 11),
-                        (12, 12), (13, 13), (14, 14)]
-        for c in fixed_merges:
-            ws.merge_range(1, c[0], 2, c[1], cols[c[0]], group_fmt)
-        ws.merge_range(1, 7, 1, 8, "DAY PROVISION", group_fmt)
-        ws.merge_range(1, 15, 1, 18, "PENDING OBS", group_fmt)
-        ws.merge_range(1, 19, 1, 22, "NEW PROVISIONS", group_fmt)
-        ws.merge_range(1, 23, 1, 26, "UC STATUS (ALL TYPES)", group_fmt)
+        # ---- rows 2-3: headers --------------------------------------------
+        def hdr(bg, size=10, rot=0, wrap=True):
+            kw = dict(bold=True, font_size=size, bg_color=bg, text_wrap=wrap)
+            if rot:
+                kw["rotation"] = rot
+            return fmt(**kw)
 
-        # Row 3: subheaders for grouped columns.
-        for j in range(7, 9):
-            ws.write(2, j, cols[j].replace("DAY PROVISION ", ""), sub_fmt)
-        for j in range(15, 27):
-            sub_label = cols[j]
-            if j == 15:
-                sub_label = sub_label.replace("PENDING OBS ", "")
-            ws.write(2, j, sub_label, sub_fmt)
+        # Columns whose header spans rows 2-3 (merged vertically).
+        merged_headers = {
+            0: (hdr(C["blue"], wrap=False), None),
+            1: (hdr(C["blue"]), "AGM/\nManager(MT)"),
+            2: (hdr(C["blue"]), None),
+            3: (hdr(C["teal"], wrap=False), None),
+            4: (hdr(C["teal"], rot=90), None),
+            5: (hdr(C["blue"]), None),
+            6: (hdr(C["gold"]), None),
+            9: (hdr(C["grey"]), None),
+            10: (hdr(C["grey"]), None),
+            11: (hdr(C["grey"], rot=90), None),
+            12: (hdr(C["grey"], rot=90), None),
+            13: (hdr(C["grey"]), None),
+            14: (hdr(C["purple"]), None),
+        }
+        for j, (f, text) in merged_headers.items():
+            label = text if text is not None else " ".join(str(cols[j]).split())
+            ws.merge_range(1, j, 2, j, label, f)
 
-        ws.set_row(1, 28)
-        ws.set_row(2, 42)
+        # Group headings (row 2) over their sub-columns (row 3).
+        ws.merge_range(1, 7, 1, 8, "DAY PROVISION", hdr(C["grey"]))
+        ws.merge_range(1, 15, 1, 18, "PENDING OBS", hdr(C["pink"], wrap=False))
+        ws.merge_range(1, 19, 1, 22, "NEW PROVISIONS", hdr(C["grey"], wrap=False))
+        ws.merge_range(1, 23, 1, 26, "UC STATUS (ALL TYPES)", hdr(C["blue"]))
 
-        # Column widths adapted to the supplied reference layout.
-        widths = [7, 20, 31, 16, 17, 15, 14, 13, 13, 14, 10, 10, 10,
-                  14, 10, 14, 12, 15, 15, 18, 16, 16, 18, 15, 15, 15, 12]
-        for j, width in enumerate(widths):
-            ws.set_column(j, j, width)
+        def sub_label(j):
+            text = " ".join(str(cols[j]).split())
+            for prefix in ("DAY PROVISION ", "PENDING OBS "):
+                if text.startswith(prefix):
+                    text = text[len(prefix):]
+            return text
 
-        # Main rows.
-        for i, (_, row) in enumerate(report.iterrows(), start=3):
-            fmt = alt_fmt if (i - 3) % 2 else cell_fmt
-            for j, col in enumerate(cols):
-                value = row[col]
-                if pd.isna(value):
-                    ws.write_blank(i, j, None, fmt)
-                elif col == "% ACH":
-                    ws.write_number(i, j, float(value), pct_fmt)
-                elif col == "NET":
-                    try:
-                        ws.write_number(i, j, float(value), neg_fmt if float(value) < 0 else pos_fmt)
-                    except Exception:
-                        ws.write(i, j, value, fmt)
+        sub_formats = {
+            7: hdr(C["grey"], rot=90), 8: hdr(C["grey"], rot=90),
+            15: hdr(C["pink"], rot=90), 16: hdr(C["pink"], rot=90),
+            17: hdr(C["pink"], rot=90), 18: hdr(C["pink"], rot=90),
+            19: hdr(C["grey"], size=8, rot=90),
+            20: hdr(C["green"], size=8, rot=90),
+            21: hdr(C["grey"], size=8, rot=90),
+            22: hdr(C["grey"], size=8, rot=90),
+            23: hdr(C["blue"], rot=90), 24: hdr(C["green"], rot=90),
+            25: hdr(C["blue"], rot=90), 26: hdr(C["gold"]),
+        }
+        for j, f in sub_formats.items():
+            ws.write(2, j, sub_label(j), f)
+        ws.set_row(1, 41.25)
+        ws.set_row(2, 112.5)
+
+        # ---- data rows ------------------------------------------------------
+        first, last = 3, 3 + n - 1          # 0-based first/last data row
+        total_row = 3 + n
+
+        def data_fmt(j, alt):
+            if j == 0:  return fmt()
+            if j == 2:  return fmt(font_size=11, bold=True)
+            if j in (3, 5, 6):  return fmt(font_size=11)
+            if j in (7, 8):     return fmt(font_size=11, font_color=C["text"], bg_color=C["white"])
+            if j == 9:  return fmt(font_size=11, font_color=C["text"], bg_color=C["green"])
+            if j == 10: return fmt(num_format="0.00%")
+            if j in (11, 12):
+                return fmt(font_size=11, font_color=C["text"],
+                           bg_color=C["stripe"] if alt else C["white"])
+            if j == 13: return fmt(font_size=11, bg_color=C["white"])
+            if j == 14: return fmt(num_format=_DR_NET_FORMAT)
+            if j == 15: return fmt(font_size=11, bold=True)
+            if j in (16, 17, 18): return fmt(font_size=11)
+            if j == 23: return fmt(font_size=11, font_color=C["text"], bg_color=C["white"])
+            if j == 24: return fmt(font_size=11, bg_color=C["white"])
+            return fmt()                      # 19-22, 25, 26
+
+        # Column values kept for cached formula results and totals.
+        col_values = {j: [] for j in range(27)}
+        for i in range(n):
+            r = first + i
+            xr = r + 1                         # Excel row number
+            alt = (i % 2 == 1)
+            row = report.iloc[i]
+            raw = {j: _dr_value(row[cols[j]]) for j in range(27)}
+
+            gross, target = _dr_num(raw[9]), _dr_num(raw[6])
+            clsvo, clsnp = _dr_num(raw[11]), _dr_num(raw[12])
+            disc = clsvo + clsnp
+            net = gross - disc
+            circle, recon = _dr_num(raw[19]), _dr_num(raw[22])
+            uc_req, uc_app, uc_rej = _dr_num(raw[23]), _dr_num(raw[24]), _dr_num(raw[25])
+            calc = {
+                10: (f"=IF(G{xr}=0,0,J{xr}/G{xr})", gross / target if target else 0),
+                13: (f"=L{xr}+M{xr}", disc),
+                14: (f"=J{xr}-N{xr}", net),
+                20: (f"=J{xr}-T{xr}-W{xr}", gross - circle - recon),
+                26: (f"=X{xr}-Y{xr}-Z{xr}", uc_req - uc_app - uc_rej),
+            }
+            for j in range(27):
+                if j in (1, 4):                # merged blocks are written below
+                    continue
+                f = data_fmt(j, alt)
+                if j in calc:
+                    formula, cached = calc[j]
+                    ws.write_formula(r, j, formula, f, cached)
+                    col_values[j].append(cached)
                 else:
-                    ws.write(i, j, value, fmt)
+                    v = raw[j]
+                    if v is None:
+                        ws.write_blank(r, j, None, f)
+                    else:
+                        ws.write(r, j, v, f)
+                        if isinstance(v, (int, float)):
+                            col_values[j].append(v)
+            ws.set_row(r, 18)
 
-        # Merge manager cells vertically for contiguous BBM rows.
-        start = 3
-        while start < 3 + len(report):
-            manager = report.iloc[start - 3]["AGM/ Manager(MT)"]
+        # AGM / Manager: vertically merged per manager, text rotated 45 degrees.
+        managers = [str(_dr_value(v) or "") for v in report[cols[1]]]
+        start = 0
+        while start < n:
             end = start
-            while end + 1 < 3 + len(report) and report.iloc[end + 1 - 3]["AGM/ Manager(MT)"] == manager:
+            while end + 1 < n and managers[end + 1] == managers[start]:
                 end += 1
+            name = managers[start]
+            size = 10 if len(name) <= 11 else (9 if len(name) <= 16 else 8)
+            f = fmt(font_size=size, bold=True, rotation=45)
             if end > start:
-                ws.merge_range(start, 1, end, 1, manager, cell_fmt)
+                ws.merge_range(first + start, 1, first + end, 1, name, f)
+            else:
+                ws.write(first + start, 1, name, f)
             start = end + 1
 
-        # Total row, including weighted achievement.
-        total_row = 3 + len(report)
-        ws.merge_range(total_row, 0, total_row, 4, "TOTAL", total_fmt)
-        for j, col in enumerate(cols):
-            if j <= 4:
-                continue
-            if col == "% ACH":
-                target_col = next(c for c in cols if c.startswith("TARGET "))
-                total_target = pd.to_numeric(report[target_col], errors="coerce").fillna(0).sum()
-                total_gross = pd.to_numeric(report["GROSS PROVISION"], errors="coerce").fillna(0).sum()
-                ws.write_number(total_row, j, total_gross / total_target if total_target else 0, total_pct_fmt)
-            elif pd.api.types.is_numeric_dtype(report[col]):
-                val = pd.to_numeric(report[col], errors="coerce").sum(min_count=1)
-                if pd.isna(val):
-                    ws.write_blank(total_row, j, None, total_fmt)
-                else:
-                    ws.write_number(total_row, j, float(val), total_fmt)
-            else:
-                ws.write(total_row, j, "", total_fmt)
-        ws.set_row(total_row, 25)
-        ws.autofilter(2, 0, total_row - 1, last_col)
+        # Exclusive / Non-Exclusive: one merged, 90-degree block (as in the reference).
+        excl_values = [str(_dr_value(v) or "") for v in report[cols[4]]]
+        excl_label = next((v for v in excl_values if v), "")
+        f = fmt(bold=True, rotation=90)
+        if n > 1:
+            ws.merge_range(first, 4, last, 4, excl_label, f)
+        elif n == 1:
+            ws.write(first, 4, excl_label, f)
 
-        # Additional raw-data and audit sheets make reconciliation possible.
+        # ---- TOTAL row ---------------------------------------------------------
+        xr1, xr2 = first + 1, last + 1
+        tot_bg = {5: C["blue"], 6: C["gold"], 7: C["tot_grey"], 8: C["tot_grey"],
+                  9: C["tot_green"], 10: C["tot_grey"], 11: C["tot_grey"],
+                  12: C["tot_grey"], 13: C["tot_grey"],
+                  15: C["tot_pink"], 16: C["tot_pink"], 17: C["tot_pink"], 18: C["tot_pink"],
+                  19: C["tot_lgrey"], 20: C["tot_lgrey"], 21: C["tot_lgrey"], 22: C["tot_lgrey"],
+                  23: C["blue"], 24: C["blue"], 25: C["blue"], 26: C["gold"]}
+        if n:
+            if n > 1:
+                ws.merge_range(total_row, 0, total_row, 4, "TOTAL",
+                               fmt(font_size=11, bold=True, bg_color=C["blue"], text_wrap=True))
+            else:
+                ws.write(total_row, 0, "TOTAL",
+                         fmt(font_size=11, bold=True, bg_color=C["blue"]))
+            sums = {}
+            for j in range(5, 27):
+                L = xl_col_to_name(j)
+                if j == 14:   # NET total: same arrow format + colour scale, no fill
+                    net_total = sum(col_values[9]) - sum(col_values[13])
+                    ws.write_formula(total_row, j, f"=J{total_row+1}-N{total_row+1}",
+                                     fmt(num_format=_DR_NET_FORMAT), net_total)
+                    continue
+                f = fmt(font_size=12, bold=True, bg_color=tot_bg[j],
+                        num_format="0.00%" if j == 10 else "General")
+                if j == 10:
+                    tg, gp = sum(col_values[6]), sum(col_values[9])
+                    ws.write_formula(total_row, j,
+                                     f"=IF(G{total_row+1}=0,0,J{total_row+1}/G{total_row+1})",
+                                     f, gp / tg if tg else 0)
+                elif col_values[j]:
+                    ws.write_formula(total_row, j, f"=SUM({L}{xr1}:{L}{xr2})", f,
+                                     sum(col_values[j]))
+                else:
+                    # Column has no source data (e.g. COMPLETED): keep it blank
+                    # rather than showing a misleading 0.
+                    ws.write_blank(total_row, j, None, f)
+            ws.set_row(total_row, 21)
+
+            # NET column colour scale (red -> white at 0 -> green), as in the reference.
+            ws.conditional_format(first, 14, total_row, 14, {
+                "type": "3_color_scale",
+                "min_type": "min", "min_color": C["scale_min"],
+                "mid_type": "num", "mid_value": 0, "mid_color": C["scale_mid"],
+                "max_type": "max", "max_color": C["scale_max"],
+            })
+
+        # ---- column widths: reference widths, widened only if the data needs it ----
+        for j, base in enumerate(_DR_REF_WIDTHS):
+            width = base
+            if j == 2:
+                longest = max([len(str(v)) for v in report[cols[2]]] + [0])
+                width = max(base, min(longest * 1.1 + 2, 55))
+            elif j == 3:
+                longest = max([len(str(v)) for v in report[cols[3]]] + [0])
+                width = max(base, min(longest * 1.15 + 2, 26))
+            elif j == 1:
+                longest = max([len(m) for m in managers] + [0])
+                width = max(base, min(longest * 0.6 + 4, 20))
+            elif col_values.get(j):
+                top = max(abs(v) for v in col_values[j] + [sum(col_values[j])])
+                digits = len(str(int(top))) if j != 10 else 0
+                if digits >= 3:                  # avoid #### on 3+ digit totals
+                    width = max(base, digits * 1.3 + 1.4)
+            ws.set_column(j, j, width)
+
+        # ---- supporting data / audit sheets (header row in the same palette) ------
         if raw_sheets:
+            raw_header = fmt(bold=True, bg_color=C["blue"], text_wrap=True)
             for sheet_name, frame in raw_sheets.items():
                 safe_name = sheet_name[:31]
                 frame.to_excel(writer, sheet_name=safe_name, index=False)
                 raw_ws = writer.sheets[safe_name]
                 raw_ws.freeze_panes(1, 0)
                 raw_ws.hide_gridlines(2)
-                raw_ws.autofilter(0, 0, max(0, len(frame)), max(0, len(frame.columns)-1))
+                raw_ws.autofilter(0, 0, max(0, len(frame)), max(0, len(frame.columns) - 1))
                 for j, col in enumerate(frame.columns):
+                    raw_ws.write(0, j, str(col), raw_header)
                     raw_ws.set_column(j, j, min(max(12, len(str(col)) + 2), 30))
+
+
+def _daily_report_html(report, as_on):
+    """HTML version of the DAILY REPORT, styled like the reference workbook
+    (same palette, grouped/rotated headers, merged manager cells, NET arrows
+    with the red-white-green scale, coloured TOTAL row)."""
+    cols = list(report.columns)
+    n = len(report)
+    C = _DR_COLORS
+
+    def num(row, j):
+        return _dr_num(row[cols[j]])
+
+    # Values for each row; calculated columns derived exactly as in the Excel formulas.
+    rows = []
+    for _, r in report.iterrows():
+        v = {j: _dr_value(r[cols[j]]) for j in range(27)}
+        gross, target = num(r, 9), num(r, 6)
+        disc = num(r, 11) + num(r, 12)
+        v[10] = gross / target if target else 0
+        v[13] = disc
+        v[14] = gross - disc
+        v[20] = gross - num(r, 19) - num(r, 22)
+        v[26] = num(r, 23) - num(r, 24) - num(r, 25)
+        rows.append(v)
+
+    def esc(x):
+        return html.escape("" if x is None else str(x))
+
+    def sub_label(j):
+        t = " ".join(str(cols[j]).split())
+        for p in ("DAY PROVISION ", "PENDING OBS "):
+            if t.startswith(p):
+                t = t[len(p):]
+        return t
+
+    # ---- header ----
+    def th(text, bg, rows_=1, cols_=1, rot=False, small=False):
+        cls = "rot" if rot else ""
+        cls += " sm" if small else ""
+        inner = f"<span>{esc(text)}</span>" if rot else esc(text)
+        return (f'<th class="{cls.strip()}" rowspan="{rows_}" colspan="{cols_}" '
+                f'style="background:{bg}">{inner}</th>')
+
+    merged = {0: ("blue", False), 1: ("blue", False), 2: ("blue", False),
+              3: ("teal", False), 4: ("teal", True), 5: ("blue", False),
+              6: ("gold", False), 9: ("grey", False), 10: ("grey", False),
+              11: ("grey", True), 12: ("grey", True), 13: ("grey", False),
+              14: ("purple", False)}
+    h1, h2 = [], []
+    j = 0
+    while j < 27:
+        if j in merged:
+            bg, rot = merged[j]
+            label = "AGM/ Manager(MT)" if j == 1 else " ".join(str(cols[j]).split())
+            h1.append(th(label, C[bg], 2, 1, rot))
+            j += 1
+        elif j == 7:
+            h1.append(th("DAY PROVISION", C["grey"], 1, 2)); j += 2
+        elif j == 15:
+            h1.append(th("PENDING OBS", C["pink"], 1, 4)); j += 4
+        elif j == 19:
+            h1.append(th("NEW PROVISIONS", C["grey"], 1, 4)); j += 4
+        else:
+            h1.append(th("UC STATUS (ALL TYPES)", C["blue"], 1, 4)); j += 4
+    sub = {7: ("grey", 0), 8: ("grey", 0), 15: ("pink", 0), 16: ("pink", 0),
+           17: ("pink", 0), 18: ("pink", 0), 19: ("grey", 1), 20: ("green", 1),
+           21: ("grey", 1), 22: ("grey", 1), 23: ("blue", 0), 24: ("green", 0),
+           25: ("blue", 0)}
+    for j in range(7, 27):
+        if j in sub:
+            bg, small = sub[j]
+            h2.append(th(sub_label(j), C[bg], 1, 1, True, bool(small)))
+        elif j == 26:
+            h2.append(th(sub_label(j), C["gold"]))
+
+    # ---- NET colour scale (red -> white at 0 -> green) ----
+    def _mix(c1, c2, t):
+        a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#%02X%02X%02X" % tuple(round(x + (y - x) * t) for x, y in zip(a, b))
+
+    nets = [v[14] for v in rows]
+    tot_net = sum(v[9] or 0 for v in rows) - sum(v[13] for v in rows)
+    lo, hi = min(nets + [tot_net, 0]), max(nets + [tot_net, 0])
+
+    def net_cell(val):
+        if val < 0:
+            bg = _mix(C["scale_mid"], C["scale_min"], val / lo if lo else 0)
+            return f'<td class="net" style="background:{bg}"><span class="dn">{val:g}\u25BC</span></td>'
+        bg = _mix(C["scale_mid"], C["scale_max"], val / hi if hi else 0)
+        return f'<td class="net" style="background:{bg}"><span class="up">{val:g}\u25B2</span></td>'
+
+    # ---- body ----
+    managers = [str(v[1] or "") for v in rows]
+    excl = next((str(v[4]) for v in rows if v[4]), "")
+    body = []
+    for i, v in enumerate(rows):
+        alt = i % 2 == 1
+        tds = [f"<td>{esc(v[0])}</td>"]
+        if i == 0 or managers[i] != managers[i - 1]:
+            span = 1
+            while i + span < n and managers[i + span] == managers[i]:
+                span += 1
+            tds.append(f'<td class="mgr" rowspan="{span}"><div><span>{esc(managers[i])}</span></div></td>')
+        tds.append(f'<td class="b">{esc(v[2])}</td><td>{esc(v[3])}</td>')
+        if i == 0:
+            tds.append(f'<td class="rot b" rowspan="{n}"><span>{esc(excl)}</span></td>')
+        for j in range(5, 27):
+            val = v[j]
+            if j == 10:
+                tds.append(f"<td>{val * 100:.2f}%</td>")
+            elif j == 14:
+                tds.append(net_cell(val))
+            elif j == 9:
+                tds.append(f'<td style="background:{C["green"]}">{esc(val)}</td>')
+            elif j in (11, 12):
+                bg = C["stripe"] if alt else C["white"]
+                tds.append(f'<td style="background:{bg}">{esc(val)}</td>')
+            elif j == 15:
+                tds.append(f'<td class="b">{esc(val)}</td>')
+            else:
+                tds.append(f"<td>{esc(val)}</td>")
+        body.append("<tr>" + "".join(tds) + "</tr>")
+
+    # ---- total row ----
+    def col_vals(j):
+        vals = [_dr_value(v[j]) for v in rows]
+        return [x for x in vals if isinstance(x, (int, float))]
+
+    tot_bg = {5: "blue", 6: "gold", 7: "tot_grey", 8: "tot_grey", 9: "tot_green",
+              10: "tot_grey", 11: "tot_grey", 12: "tot_grey", 13: "tot_grey",
+              15: "tot_pink", 16: "tot_pink", 17: "tot_pink", 18: "tot_pink",
+              19: "tot_lgrey", 20: "tot_lgrey", 21: "tot_lgrey", 22: "tot_lgrey",
+              23: "blue", 24: "blue", 25: "blue", 26: "gold"}
+    tt = [f'<td colspan="5" class="tot" style="background:{C["blue"]}">TOTAL</td>']
+    for j in range(5, 27):
+        if j == 14:
+            tt.append(net_cell(tot_net).replace('class="net"', 'class="net tot"'))
+            continue
+        if j == 10:
+            tg, gp = sum(col_vals(6)), sum(col_vals(9))
+            txt = f"{gp / tg * 100:.2f}%" if tg else "0.00%"
+        else:
+            vals = col_vals(j)
+            txt = esc(sum(vals)) if vals else ""   # blank when column has no data
+        tt.append(f'<td class="tot" style="background:{C[tot_bg[j]]}">{txt}</td>')
+    total_html = "<tr>" + "".join(tt) + "</tr>"
+
+    title = f"BBM WISE DAILY PROVISIONING REPORT OF WARANGAL OA AS ON {as_on:%d.%m.%Y}"
+    widths = list(_DR_REF_WIDTHS)
+    widths[1] = 15                                   # manager (rotated 45 degrees)
+    widths[2] = max(widths[2], min(max([len(str(v[2])) for v in rows] + [0]) * 1.1 + 2, 55))
+    widths[3] = max(widths[3], min(max([len(str(v[3])) for v in rows] + [0]) * 1.15 + 2, 26))
+    for j in range(5, 27):                           # never squeeze numbers
+        widths[j] = max(widths[j], 5.2 if j in (11, 12, 15, 16, 17, 18) else 4.4)
+    colgroup = "<colgroup>" + "".join(
+        f'<col style="width:{int(w * 7 + 6)}px">' for w in widths) + "</colgroup>"
+    css = f"""
+body{{font-family:Calibri,Carlito,Arial,sans-serif;margin:20px;color:#000;background:#fff}}
+.wrap{{overflow-x:auto}}
+table{{border-collapse:collapse;font-size:12px;margin:0 auto;table-layout:fixed}}
+th,td{{border:1px solid #000;padding:3px 5px;text-align:center;vertical-align:middle;height:24px}}
+th{{font-weight:700;font-size:11px;overflow:hidden}}
+th.sm{{font-size:9px}}
+.title{{background:{C['title']};font-size:16px;font-weight:700;height:34px;border:0}}
+th.rot,td.rot{{padding:4px 2px}}
+.rot span{{-webkit-writing-mode:vertical-rl;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;display:inline-block}}
+th.rot{{height:150px}}
+td.b{{font-weight:700}}
+td.mgr{{width:110px;position:relative;overflow:hidden;padding:0}}
+td.mgr div{{height:100%;display:flex;align-items:center;justify-content:center}}
+td.mgr span{{transform:rotate(-45deg);white-space:nowrap;font-weight:700;font-size:11px}}
+td.net{{white-space:nowrap}}
+.up{{color:#0A8A0A}} .dn{{color:#FF0000}}
+td.tot{{font-weight:700;font-size:14px;height:28px}}
+@media print{{body{{margin:0}} @page{{size:landscape}}}}
+"""
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>Warangal OA Daily Provisioning Report</title>"
+        f"<style>{css}</style></head><body><div class='wrap'><table>{colgroup}"
+        f"<thead><tr><th class='title' colspan='27'>{esc(title)}</th></tr>"
+        f"<tr>{''.join(h1)}</tr><tr>{''.join(h2)}</tr></thead>"
+        f"<tbody>{''.join(body)}{total_html}</tbody></table></div></body></html>"
+    )
 
 
 def run_daily_report(provisioning_file, uc_file, pending_file,
@@ -1339,20 +1692,7 @@ def run_daily_report(provisioning_file, uc_file, pending_file,
     if output_html:
         html_path = Path(output_html)
         html_path.parent.mkdir(parents=True, exist_ok=True)
-        display = report.copy()
-        display = display.to_html(index=False, border=0, classes="report", na_rep="")
-        html_path.write_text(
-            "<!doctype html><html><head><meta charset='utf-8'>"
-            "<title>Warangal OA Daily Provisioning Report</title>"
-            "<style>body{font-family:Arial;margin:24px;color:#222}"
-            "h2{background:#1F4E78;color:white;padding:14px;text-align:center}"
-            "table{border-collapse:collapse;width:100%;font-size:12px}"
-            "th{background:#1F4E78;color:white}td,th{border:1px solid #bbb;padding:6px;text-align:center}"
-            "tr:nth-child(even){background:#f4f8fb}</style></head><body>"
-            f"<h2>BBM WISE DAILY PROVISIONING REPORT OF WARANGAL OA AS ON {as_on:%d.%m.%Y}</h2>"
-            + display + "</body></html>",
-            encoding="utf-8"
-        )
+        html_path.write_text(_daily_report_html(report, as_on), encoding="utf-8")
 
     metadata = {
         "report_date": as_on.strftime("%Y-%m-%d"),
