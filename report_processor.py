@@ -101,11 +101,45 @@ CONN_OTHER = "OTHER"
 
 
 def _parse_source_date(series):
-    # Handles Excel serials, datetime objects and strings such as 16-AUG-2026.
+    """
+    Parse source dates reliably.
+
+    The provisioning export uses values such as:
+        05-NOV-2026 13:22:54
+
+    Do not rely on pandas' dayfirst inference here: mixed/ambiguous inference
+    can turn valid dates into NaT or interpret them incorrectly.
+    Also retain support for Excel datetime values and Excel serial dates.
+    """
     if pd.api.types.is_datetime64_any_dtype(series):
         return pd.to_datetime(series, errors="coerce").dt.normalize()
-    out = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    return out.dt.normalize()
+
+    # First handle the exact format used by the BSNL source export.
+    text = series.astype("string").str.strip()
+    parsed = pd.to_datetime(
+        text,
+        format="%d-%b-%Y %H:%M:%S",
+        errors="coerce"
+    )
+
+    # Fallback for rows exported without time or in another recognizable form.
+    missing = parsed.isna() & text.notna() & text.ne("")
+    if missing.any():
+        parsed.loc[missing] = pd.to_datetime(
+            text.loc[missing], errors="coerce", dayfirst=True
+        )
+
+    # Handle numeric Excel serial dates if present in the source.
+    numeric = pd.to_numeric(series, errors="coerce")
+    serial_rows = parsed.isna() & numeric.notna()
+    if serial_rows.any():
+        parsed.loc[serial_rows] = (
+            pd.Timestamp("1899-12-30")
+            + pd.to_timedelta(numeric.loc[serial_rows], unit="D")
+        )
+
+    return parsed.dt.normalize()
+
 
 
 def _read_source(path):
